@@ -10,6 +10,7 @@ model_catalog_json = 'C:\path\to\codex-aoai\model-catalog.json'
 name = "Azure OpenAI Router (Entra ID)"
 base_url = "http://127.0.0.1:8766/v1"
 wire_api = "responses"
+stream_max_retries = 10
 
 [model_providers.azure-router.auth]
 command = 'C:\path\to\codex-aoai\.venv\Scripts\pythonw.exe'

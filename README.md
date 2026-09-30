@@ -298,6 +298,19 @@ resource.
 The route points to the wrong resource, or the configured model value is not
 the Azure deployment name.
 
+**Codex stops after `Reconnecting .../5`**
+
+Set `stream_max_retries` on the router provider:
+
+```toml
+[model_providers.azure-router]
+stream_max_retries = 10
+```
+
+Codex defaults to `5` and caps the setting at `100`. More reconnects do not add
+Azure quota or guarantee recovery from a token-rate limit; they only extend
+Codex's bounded retry window.
+
 ## API compatibility
 
 Codex uses the Responses wire API. Azure's OpenAI-compatible v1 surface uses:
