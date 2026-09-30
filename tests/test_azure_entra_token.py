@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from azure.core.exceptions import ClientAuthenticationError
@@ -13,22 +16,33 @@ import azure_entra_token
 
 
 class AcquireTokenTests(unittest.TestCase):
-    def test_hides_azure_cli_subprocess_window(self) -> None:
-        captured: dict[str, object] = {}
-
-        def fake_check_output(*args: object, **kwargs: object) -> bytes:
-            captured["args"] = args
-            captured["kwargs"] = kwargs
-            return b"ok"
-
-        hidden_check_output = azure_entra_token.hide_windows_subprocess(
-            fake_check_output
+    def test_azure_cli_mode_invokes_pythonw_without_a_console(self) -> None:
+        run = Mock(
+            return_value=Mock(
+                returncode=0,
+                stdout=json.dumps({"accessToken": "token-value"}),
+                stderr="",
+            )
         )
-        result = hidden_check_output(["az.cmd", "account"])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cli_pythonw = Path(temp_dir) / "pythonw.exe"
+            cli_pythonw.touch()
+            token = azure_entra_token.acquire_azure_cli_token(
+                azure_entra_token.DEFAULT_SCOPE,
+                cli_pythonw=str(cli_pythonw),
+                run=run,
+            )
 
-        self.assertEqual(result, b"ok")
-        kwargs = captured["kwargs"]
-        self.assertIsInstance(kwargs, dict)
+        self.assertEqual(token, "token-value")
+        command = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
+        self.assertEqual(command[0], str(cli_pythonw))
+        self.assertEqual(command[1:4], ["-IBm", "azure.cli", "account"])
+        resource_index = command.index("--resource") + 1
+        self.assertEqual(
+            command[resource_index],
+            "https://cognitiveservices.azure.com",
+        )
         self.assertTrue(
             kwargs.get("creationflags", 0) & subprocess.CREATE_NO_WINDOW
         )
@@ -37,50 +51,43 @@ class AcquireTokenTests(unittest.TestCase):
         self.assertTrue(startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW)
         self.assertEqual(startupinfo.wShowWindow, subprocess.SW_HIDE)
 
-    @patch("azure_entra_token.get_bearer_token_provider")
+    @patch("azure_entra_token.acquire_azure_cli_token")
     @patch("azure_entra_token.DefaultAzureCredential")
     def test_uses_default_scope_and_trims_token(
         self,
         credential_factory: Mock,
-        provider_factory: Mock,
+        acquire_cli_token: Mock,
     ) -> None:
-        credential = credential_factory.return_value
-        provider_factory.return_value = lambda: " token-value \n"
+        acquire_cli_token.return_value = " token-value \n"
 
         token = azure_entra_token.acquire_token()
 
         self.assertEqual(token, "token-value")
-        provider_factory.assert_called_once_with(
-            credential,
+        acquire_cli_token.assert_called_once_with(
             azure_entra_token.DEFAULT_SCOPE,
         )
-        credential_factory.assert_called_once_with(
-            process_timeout=azure_entra_token.PROCESS_TIMEOUT_SECONDS,
-            **azure_entra_token.AZURE_CLI_CREDENTIAL_OPTIONS,
-        )
-        credential.close.assert_called_once_with()
+        credential_factory.assert_not_called()
 
     @patch.dict(
         os.environ,
         {azure_entra_token.SCOPE_ENV_VAR: "https://ai.azure.com/.default"},
         clear=False,
     )
-    @patch("azure_entra_token.get_bearer_token_provider")
+    @patch("azure_entra_token.acquire_azure_cli_token")
     @patch("azure_entra_token.DefaultAzureCredential")
     def test_supports_scope_override(
         self,
         credential_factory: Mock,
-        provider_factory: Mock,
+        acquire_cli_token: Mock,
     ) -> None:
-        credential = credential_factory.return_value
-        provider_factory.return_value = lambda: "token-value"
+        acquire_cli_token.return_value = "token-value"
 
         azure_entra_token.acquire_token()
 
-        provider_factory.assert_called_once_with(
-            credential,
+        acquire_cli_token.assert_called_once_with(
             "https://ai.azure.com/.default",
         )
+        credential_factory.assert_not_called()
 
     @patch.dict(
         os.environ,
@@ -103,45 +110,31 @@ class AcquireTokenTests(unittest.TestCase):
             azure_entra_token.credential_options()
 
     @patch("azure_entra_token.time.sleep")
-    @patch("azure_entra_token.get_bearer_token_provider")
-    @patch("azure_entra_token.DefaultAzureCredential")
+    @patch("azure_entra_token.acquire_azure_cli_token")
     def test_retries_transient_authentication_failure(
         self,
-        credential_factory: Mock,
-        provider_factory: Mock,
+        acquire_cli_token: Mock,
         sleep: Mock,
     ) -> None:
-        first_credential = Mock()
-        second_credential = Mock()
-        credential_factory.side_effect = [first_credential, second_credential]
-        provider_factory.side_effect = [
-            lambda: (_ for _ in ()).throw(
-                ClientAuthenticationError("temporary failure")
-            ),
-            lambda: "token-value",
+        acquire_cli_token.side_effect = [
+            ClientAuthenticationError("temporary failure"),
+            "token-value",
         ]
 
         token = azure_entra_token.acquire_token()
 
         self.assertEqual(token, "token-value")
         sleep.assert_called_once_with(1)
-        first_credential.close.assert_called_once_with()
-        second_credential.close.assert_called_once_with()
 
-    @patch("azure_entra_token.get_bearer_token_provider")
-    @patch("azure_entra_token.DefaultAzureCredential")
+    @patch("azure_entra_token.acquire_azure_cli_token")
     def test_rejects_empty_token(
         self,
-        credential_factory: Mock,
-        provider_factory: Mock,
+        acquire_cli_token: Mock,
     ) -> None:
-        credential = credential_factory.return_value
-        provider_factory.return_value = lambda: "  "
+        acquire_cli_token.return_value = "  "
 
         with self.assertRaisesRegex(RuntimeError, "empty access token"):
             azure_entra_token.acquire_token()
-
-        credential.close.assert_called_once_with()
 
     @patch(
         "azure_entra_token.acquire_token",

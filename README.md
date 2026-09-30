@@ -34,7 +34,7 @@ reasoning-effort selection can then use the normal Codex `/model` interface.
 1. Codex loads `model-catalog.json`, which lists the permitted deployment names
    and supported reasoning efforts.
 2. Codex invokes `azure_entra_token.py` through command-backed provider auth.
-3. The helper obtains an Entra token with `DefaultAzureCredential`.
+3. The helper obtains an Entra token from the configured credential mode.
 4. Codex sends the request and bearer token to the loopback router.
 5. `azure_openai_router.py` routes by deployment name and streams the Azure
    Responses API result back to Codex.
@@ -170,13 +170,14 @@ codex app-server daemon restart
 
 ## Authentication modes
 
-The helper defaults to the Azure CLI credential within
-`DefaultAzureCredential`. This avoids slow probes of unavailable hosted
-credentials on a local Windows workstation.
+The helper defaults to Azure CLI's installed `pythonw.exe` entry point. It
+reuses the existing `az login` cache while bypassing both `az.cmd` and console
+`python.exe`.
 
 Codex invokes the helper with `pythonw.exe`, so token refresh does not flash a
-terminal window. The helper also applies Windows no-window startup flags to the
-Azure CLI child process. Codex captures the helper's stdout pipe directly.
+terminal window. The traced process tree contains only `pythonw.exe` processes;
+there are no `cmd.exe`, `python.exe`, or `conhost.exe` descendants. Codex
+captures the helper's stdout pipe directly.
 
 Use the full credential chain for a service principal, workload identity,
 managed identity, or another supported source:

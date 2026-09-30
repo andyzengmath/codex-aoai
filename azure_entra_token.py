@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,34 +19,69 @@ CREDENTIAL_MODE_ENV_VAR = "AZURE_OPENAI_CREDENTIAL_MODE"
 LOCK_TIMEOUT_SECONDS = 90
 PROCESS_TIMEOUT_SECONDS = 30
 TOKEN_ATTEMPTS = 2
-AZURE_CLI_CREDENTIAL_OPTIONS = {
-    "exclude_environment_credential": True,
-    "exclude_workload_identity_credential": True,
-    "exclude_managed_identity_credential": True,
-    "exclude_shared_token_cache_credential": True,
-    "exclude_visual_studio_code_credential": True,
-    "exclude_powershell_credential": True,
-    "exclude_developer_cli_credential": True,
-    "exclude_broker_credential": True,
-}
+AZURE_CLI_PYTHONW_ENV_VAR = "AZURE_CLI_PYTHONW"
 
 
-def hide_windows_subprocess(check_output):
-    if getattr(check_output, "_codex_hidden_window", False):
-        return check_output
+def acquire_azure_cli_token(
+    scope: str,
+    *,
+    cli_pythonw: str | None = None,
+    run=subprocess.run,
+) -> str:
+    if not scope.endswith("/.default"):
+        raise ValueError("Azure CLI mode requires a scope ending in '/.default'")
+    resource = scope[: -len("/.default")]
 
-    def hidden_check_output(*args, **kwargs):
-        startupinfo = kwargs.get("startupinfo") or subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        kwargs["startupinfo"] = startupinfo
-        kwargs["creationflags"] = (
-            kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+    if cli_pythonw is None:
+        cli_pythonw = os.environ.get(AZURE_CLI_PYTHONW_ENV_VAR)
+    if cli_pythonw is None:
+        az_cmd = shutil.which("az.cmd") or shutil.which("az")
+        if az_cmd:
+            cli_pythonw = str(Path(az_cmd).resolve().parent.parent / "pythonw.exe")
+    if not cli_pythonw or not Path(cli_pythonw).is_file():
+        raise ClientAuthenticationError(
+            "Azure CLI pythonw.exe was not found; set "
+            f"{AZURE_CLI_PYTHONW_ENV_VAR}"
         )
-        return check_output(*args, **kwargs)
 
-    hidden_check_output._codex_hidden_window = True
-    return hidden_check_output
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    result = run(
+        [
+            cli_pythonw,
+            "-IBm",
+            "azure.cli",
+            "account",
+            "get-access-token",
+            "--output",
+            "json",
+            "--resource",
+            resource,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=PROCESS_TIMEOUT_SECONDS,
+        cwd=os.environ.get("SYSTEMROOT"),
+        env={
+            **os.environ,
+            "AZ_INSTALLER": "MSI",
+            "AZURE_CORE_NO_COLOR": "true",
+        },
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        startupinfo=startupinfo,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or "Azure CLI token request failed"
+        raise ClientAuthenticationError(message)
+
+    try:
+        token = json.loads(result.stdout)["accessToken"].strip()
+    except (json.JSONDecodeError, KeyError, AttributeError) as exc:
+        raise ClientAuthenticationError(
+            "Azure CLI returned an invalid token response"
+        ) from exc
+    return token
 
 
 @contextmanager
@@ -80,10 +117,7 @@ def credential_lock():
 def credential_options() -> dict[str, bool | int]:
     mode = os.environ.get(CREDENTIAL_MODE_ENV_VAR, "azure-cli").strip().lower()
     if mode == "azure-cli":
-        return {
-            "process_timeout": PROCESS_TIMEOUT_SECONDS,
-            **AZURE_CLI_CREDENTIAL_OPTIONS,
-        }
+        return {}
     if mode == "default":
         return {"process_timeout": PROCESS_TIMEOUT_SECONDS}
     raise ValueError(
@@ -95,26 +129,30 @@ def acquire_token() -> str:
     scope = os.environ.get(SCOPE_ENV_VAR, DEFAULT_SCOPE).strip()
     if not scope:
         raise ValueError(f"{SCOPE_ENV_VAR} must not be empty")
-    if sys.platform == "win32":
-        subprocess.check_output = hide_windows_subprocess(
-            subprocess.check_output
-        )
+    mode = os.environ.get(CREDENTIAL_MODE_ENV_VAR, "azure-cli").strip().lower()
     options = credential_options()
 
     with credential_lock():
         last_error = None
         for attempt in range(TOKEN_ATTEMPTS):
-            credential = DefaultAzureCredential(**options)
             try:
-                token_provider = get_bearer_token_provider(credential, scope)
-                token = token_provider().strip()
+                if mode == "azure-cli":
+                    token = acquire_azure_cli_token(scope).strip()
+                else:
+                    credential = DefaultAzureCredential(**options)
+                    try:
+                        token_provider = get_bearer_token_provider(
+                            credential,
+                            scope,
+                        )
+                        token = token_provider().strip()
+                    finally:
+                        credential.close()
                 break
             except ClientAuthenticationError as exc:
                 last_error = exc
                 if attempt + 1 < TOKEN_ATTEMPTS:
                     time.sleep(1)
-            finally:
-                credential.close()
         else:
             assert last_error is not None
             raise last_error
