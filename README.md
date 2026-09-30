@@ -304,12 +304,12 @@ Set `stream_max_retries` on the router provider:
 
 ```toml
 [model_providers.azure-router]
-stream_max_retries = 10
+stream_max_retries = 100
 ```
 
-Codex defaults to `5` and caps the setting at `100`. More reconnects do not add
-Azure quota or guarantee recovery from a token-rate limit; they only extend
-Codex's bounded retry window.
+Codex defaults to `5`; `100` is the hard cap. This can keep a failed request
+retrying for a long time. More reconnects do not add Azure quota or guarantee
+recovery from a token-rate limit; they only extend Codex's bounded retry window.
 
 ## API compatibility
 
