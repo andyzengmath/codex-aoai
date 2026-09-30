@@ -136,19 +136,56 @@ settings.
 
 ## Running the router
 
-Start the router in a separate terminal:
+Run these commands from the repository root.
+
+### Foreground
+
+Use foreground mode when you want to see startup and error messages. Keep this
+terminal open while using Codex:
 
 ```powershell
 .\.venv\Scripts\python.exe .\azure_openai_router.py `
   --config .\routes.local.json
 ```
 
-The startup line should report a loopback URL and the configured route count.
+### Hidden background
+
+Use background mode before opening Codex Desktop:
+
+```powershell
+$repo = (Resolve-Path .).Path
+$pythonw = Join-Path $repo ".venv\Scripts\pythonw.exe"
+$router = Join-Path $repo "azure_openai_router.py"
+$config = Join-Path $repo "routes.local.json"
+
+Start-Process `
+  -FilePath $pythonw `
+  -ArgumentList @("`"$router`"", "--config", "`"$config`"") `
+  -WorkingDirectory $repo `
+  -WindowStyle Hidden
+```
+
+The background router continues serving both Codex CLI and Desktop until the
+process stops or Windows restarts. You do not need to open a Codex CLI session
+before opening Desktop.
+
+### Check router health
+
 The health endpoint contains no deployment details:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8766/health
 ```
+
+Expected values:
+
+```text
+status      ok
+route_count 2
+```
+
+If the health request succeeds, the router is already running. Do not start a
+second copy.
 
 ## Using Codex
 
