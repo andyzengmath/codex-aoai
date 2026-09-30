@@ -33,17 +33,21 @@ reasoning-effort selection can then use the normal Codex `/model` interface.
 
 1. Codex loads `model-catalog.json`, which lists the permitted deployment names
    and supported reasoning efforts.
-2. Codex invokes `azure_entra_token.py` through command-backed provider auth.
-3. The helper obtains an Entra token from the configured credential mode.
-4. Codex sends the request and bearer token to the loopback router.
-5. `azure_openai_router.py` routes by deployment name and streams the Azure
+2. Codex remains signed in with ChatGPT and sends its account bearer only to
+   the loopback router.
+3. The router discards that incoming bearer and uses `azure_entra_token.py` to
+   obtain an Entra token in memory.
+4. The router routes by deployment name and sends only the Entra bearer to
+   Azure.
+5. `azure_openai_router.py` streams the Azure
    Responses API result back to Codex.
 
 The router:
 
 - binds only to loopback
 - requires an `Authorization: Bearer` header
-- never stores the bearer token
+- never forwards the incoming ChatGPT bearer to Azure
+- caches the Entra bearer only in memory until shortly before expiry
 - rejects models missing from the local route map
 - preserves streaming Responses API traffic
 
@@ -207,14 +211,14 @@ codex app-server daemon restart
 
 ## Authentication modes
 
-The helper defaults to Azure CLI's installed `pythonw.exe` entry point. It
-reuses the existing `az login` cache while bypassing both `az.cmd` and console
-`python.exe`.
+Codex uses its normal ChatGPT login because the provider sets
+`requires_openai_auth = true`. The router uses Azure CLI's installed
+`pythonw.exe` entry point for Entra. It reuses the existing `az login` cache
+while bypassing both `az.cmd` and console `python.exe`.
 
-Codex invokes the helper with `pythonw.exe`, so token refresh does not flash a
-terminal window. The traced process tree contains only `pythonw.exe` processes;
-there are no `cmd.exe`, `python.exe`, or `conhost.exe` descendants. Codex
-captures the helper's stdout pipe directly.
+Token refresh does not flash a terminal window. The traced process tree
+contains only `pythonw.exe` processes; there are no `cmd.exe`, `python.exe`, or
+`conhost.exe` descendants.
 
 Use the full credential chain for a service principal, workload identity,
 managed identity, or another supported source:
@@ -285,8 +289,9 @@ The request's deployment name is missing from `routes.local.json`.
 
 **The router returns 401**
 
-Codex did not send the command-backed Entra bearer token. Check the provider
-auth block and run the token helper locally without logging its output.
+Codex did not send its ChatGPT bearer token to the loopback provider. Confirm
+that you are signed in with ChatGPT and that the provider has
+`requires_openai_auth = true`.
 
 **Azure returns 403**
 

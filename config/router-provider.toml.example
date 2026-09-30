@@ -11,9 +11,4 @@ name = "Azure OpenAI Router (Entra ID)"
 base_url = "http://127.0.0.1:8766/v1"
 wire_api = "responses"
 stream_max_retries = 100
-
-[model_providers.azure-router.auth]
-command = 'C:\path\to\codex-aoai\.venv\Scripts\pythonw.exe'
-args = ['C:\path\to\codex-aoai\azure_entra_token.py']
-timeout_ms = 120000
-refresh_interval_ms = 300000
+requires_openai_auth = true

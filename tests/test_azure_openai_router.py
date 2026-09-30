@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import http.client
 import json
 import io
 import threading
@@ -10,8 +12,15 @@ import urllib.request
 from contextlib import contextmanager, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import Mock
 
-from azure_openai_router import RouterConfig, create_server, load_config, main
+from azure_openai_router import (
+    EntraTokenCache,
+    RouterConfig,
+    create_server,
+    load_config,
+    main,
+)
 
 
 class RecordingUpstreamHandler(BaseHTTPRequestHandler):
@@ -24,6 +33,7 @@ class RecordingUpstreamHandler(BaseHTTPRequestHandler):
             {
                 "path": self.path,
                 "authorization": self.headers.get("Authorization"),
+                "authorization_values": self.headers.get_all("Authorization"),
                 "content_type": self.headers.get("Content-Type"),
                 "body": body,
             }
@@ -64,6 +74,13 @@ def request_json(url: str) -> dict[str, object]:
         return json.load(response)
 
 
+def unsigned_jwt(exp: int) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": exp}).encode()
+    ).rstrip(b"=")
+    return f"header.{payload.decode()}.signature"
+
+
 class AzureOpenAIRouterTests(unittest.TestCase):
     def setUp(self) -> None:
         RecordingUpstreamHandler.requests = []
@@ -80,7 +97,10 @@ class AzureOpenAIRouterTests(unittest.TestCase):
                 "MODEL_SECONDARY": f"http://127.0.0.1:{upstream_port}/openai/v1",
             },
         )
-        self.router = create_server(self.config)
+        self.router = create_server(
+            self.config,
+            token_provider=lambda: "entra-token",
+        )
 
     def tearDown(self) -> None:
         self.upstream.server_close()
@@ -93,19 +113,24 @@ class AzureOpenAIRouterTests(unittest.TestCase):
 
         with running_server(self.upstream), running_server(self.router):
             router_port = self.router.server_address[1]
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{router_port}/v1/responses",
-                data=payload,
-                method="POST",
-                headers={
-                    "Authorization": "Bearer entra-token",
-                    "Content-Type": "application/json",
-                },
+            connection = http.client.HTTPConnection(
+                "127.0.0.1",
+                router_port,
+                timeout=5,
             )
-            with urllib.request.urlopen(request, timeout=5) as response:
+            connection.putrequest("POST", "/v1/responses")
+            connection.putheader("authorization", "Bearer chatgpt-token")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(len(payload)))
+            connection.endheaders(payload)
+            response = connection.getresponse()
+            try:
                 status = response.status
                 content_type = response.headers.get_content_type()
                 body = response.read()
+            finally:
+                response.close()
+                connection.close()
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "text/event-stream")
@@ -116,6 +141,7 @@ class AzureOpenAIRouterTests(unittest.TestCase):
                 {
                     "path": "/openai/v1/responses",
                     "authorization": "Bearer entra-token",
+                    "authorization_values": ["Bearer entra-token"],
                     "content_type": "application/json",
                     "body": payload,
                 }
@@ -179,6 +205,31 @@ class AzureOpenAIRouterTests(unittest.TestCase):
             [model["id"] for model in models["data"]],
             ["MODEL_PRIMARY", "MODEL_SECONDARY"],
         )
+
+    def test_entra_token_cache_reuses_and_refreshes_before_expiry(self) -> None:
+        now = [100.0]
+        loader = Mock(
+            side_effect=[
+                unsigned_jwt(1000),
+                unsigned_jwt(2000),
+                unsigned_jwt(3000),
+            ]
+        )
+        cache = EntraTokenCache(
+            loader,
+            clock=lambda: now[0],
+            refresh_skew_seconds=300,
+        )
+
+        first = cache.get_token()
+        now[0] = 600
+        cached = cache.get_token()
+        now[0] = 701
+        refreshed = cache.get_token()
+
+        self.assertEqual(first, cached)
+        self.assertNotEqual(refreshed, first)
+        self.assertEqual(loader.call_count, 2)
 
     def test_loads_placeholder_route_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

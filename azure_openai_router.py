@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import http.client
 import json
 import sys
+import time
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from azure.core.exceptions import ClientAuthenticationError
+from azure_entra_token import acquire_token
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -28,6 +34,53 @@ class RouterConfig:
     listen_host: str
     listen_port: int
     routes: dict[str, str]
+
+
+class EntraTokenCache:
+    def __init__(
+        self,
+        loader,
+        *,
+        clock=time.time,
+        refresh_skew_seconds: int = 300,
+    ) -> None:
+        self._loader = loader
+        self._clock = clock
+        self._refresh_skew_seconds = refresh_skew_seconds
+        self._lock = threading.Lock()
+        self._token: str | None = None
+        self._expires_at = 0.0
+
+    def get_token(self) -> str:
+        now = self._clock()
+        if (
+            self._token is not None
+            and now < self._expires_at - self._refresh_skew_seconds
+        ):
+            return self._token
+
+        with self._lock:
+            now = self._clock()
+            if (
+                self._token is not None
+                and now < self._expires_at - self._refresh_skew_seconds
+            ):
+                return self._token
+
+            token = self._loader()
+            self._token = token
+            self._expires_at = self._token_expiry(token, now)
+            return token
+
+    @staticmethod
+    def _token_expiry(token: str, now: float) -> float:
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+            return float(claims["exp"])
+        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return now + 300
 
 
 def load_config(path: Path) -> RouterConfig:
@@ -95,7 +148,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    server = create_server(config)
+    token_cache = EntraTokenCache(acquire_token)
+    server = create_server(config, token_provider=token_cache.get_token)
     print(
         f"Azure OpenAI router listening on "
         f"http://{config.listen_host}:{config.listen_port} "
@@ -111,7 +165,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def create_server(config: RouterConfig) -> ThreadingHTTPServer:
+def create_server(
+    config: RouterConfig,
+    token_provider=None,
+) -> ThreadingHTTPServer:
     class RouterHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             path = urlsplit(self.path).path
@@ -224,9 +281,27 @@ def create_server(config: RouterConfig) -> ThreadingHTTPServer:
                 key: value
                 for key, value in self.headers.items()
                 if key.lower()
-                not in HOP_BY_HOP_HEADERS | {"host", "content-length"}
+                not in HOP_BY_HOP_HEADERS
+                | {"host", "content-length", "authorization"}
             }
             headers["Content-Length"] = str(len(body))
+            if token_provider is not None:
+                try:
+                    headers["Authorization"] = (
+                        f"Bearer {token_provider()}"
+                    )
+                except (ClientAuthenticationError, RuntimeError, ValueError) as exc:
+                    self._send_json(
+                        502,
+                        {
+                            "error": {
+                                "code": "entra_authentication_failed",
+                                "message": str(exc),
+                            }
+                        },
+                    )
+                    connection.close()
+                    return
 
             try:
                 connection.request(
