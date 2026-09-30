@@ -1,0 +1,7 @@
+.venv/
+.catalog-build/
+.runtime/
+__pycache__/
+*.pyc
+model-catalog.json
+routes.local.json

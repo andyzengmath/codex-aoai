@@ -1,0 +1,5 @@
+# Copy to ~/.codex/secondary-model.config.toml.
+
+model = "MODEL_DEPLOYMENT_SECONDARY"
+model_provider = "azure-router"
+model_reasoning_effort = "medium"

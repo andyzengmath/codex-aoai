@@ -1,0 +1,8 @@
+{
+  "listen_host": "127.0.0.1",
+  "listen_port": 8766,
+  "routes": {
+    "MODEL_DEPLOYMENT_PRIMARY": "https://AZURE_RESOURCE_PRIMARY.openai.azure.com/openai/v1",
+    "MODEL_DEPLOYMENT_SECONDARY": "https://AZURE_RESOURCE_SECONDARY.openai.azure.com/openai/v1"
+  }
+}

@@ -1,0 +1,18 @@
+# Merge these settings into ~/.codex/config.toml.
+# Replace C:\path\to\codex-aoai with this repository's absolute path.
+
+model = "MODEL_DEPLOYMENT_PRIMARY"
+model_provider = "azure-router"
+model_reasoning_effort = "medium"
+model_catalog_json = 'C:\path\to\codex-aoai\model-catalog.json'
+
+[model_providers.azure-router]
+name = "Azure OpenAI Router (Entra ID)"
+base_url = "http://127.0.0.1:8766/v1"
+wire_api = "responses"
+
+[model_providers.azure-router.auth]
+command = 'C:\path\to\codex-aoai\.venv\Scripts\pythonw.exe'
+args = ['C:\path\to\codex-aoai\azure_entra_token.py']
+timeout_ms = 120000
+refresh_interval_ms = 300000
