@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock, patch
@@ -12,6 +13,30 @@ import azure_entra_token
 
 
 class AcquireTokenTests(unittest.TestCase):
+    def test_hides_azure_cli_subprocess_window(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_check_output(*args: object, **kwargs: object) -> bytes:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return b"ok"
+
+        hidden_check_output = azure_entra_token.hide_windows_subprocess(
+            fake_check_output
+        )
+        result = hidden_check_output(["az.cmd", "account"])
+
+        self.assertEqual(result, b"ok")
+        kwargs = captured["kwargs"]
+        self.assertIsInstance(kwargs, dict)
+        self.assertTrue(
+            kwargs.get("creationflags", 0) & subprocess.CREATE_NO_WINDOW
+        )
+        startupinfo = kwargs.get("startupinfo")
+        self.assertIsNotNone(startupinfo)
+        self.assertTrue(startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW)
+        self.assertEqual(startupinfo.wShowWindow, subprocess.SW_HIDE)
+
     @patch("azure_entra_token.get_bearer_token_provider")
     @patch("azure_entra_token.DefaultAzureCredential")
     def test_uses_default_scope_and_trims_token(

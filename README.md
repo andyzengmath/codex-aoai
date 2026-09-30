@@ -175,7 +175,8 @@ The helper defaults to the Azure CLI credential within
 credentials on a local Windows workstation.
 
 Codex invokes the helper with `pythonw.exe`, so token refresh does not flash a
-terminal window. Codex captures the helper's stdout pipe directly.
+terminal window. The helper also applies Windows no-window startup flags to the
+Azure CLI child process. Codex captures the helper's stdout pipe directly.
 
 Use the full credential chain for a service principal, workload identity,
 managed identity, or another supported source:

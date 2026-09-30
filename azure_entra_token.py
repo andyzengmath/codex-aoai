@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -26,6 +27,24 @@ AZURE_CLI_CREDENTIAL_OPTIONS = {
     "exclude_developer_cli_credential": True,
     "exclude_broker_credential": True,
 }
+
+
+def hide_windows_subprocess(check_output):
+    if getattr(check_output, "_codex_hidden_window", False):
+        return check_output
+
+    def hidden_check_output(*args, **kwargs):
+        startupinfo = kwargs.get("startupinfo") or subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = startupinfo
+        kwargs["creationflags"] = (
+            kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+        )
+        return check_output(*args, **kwargs)
+
+    hidden_check_output._codex_hidden_window = True
+    return hidden_check_output
 
 
 @contextmanager
@@ -76,6 +95,10 @@ def acquire_token() -> str:
     scope = os.environ.get(SCOPE_ENV_VAR, DEFAULT_SCOPE).strip()
     if not scope:
         raise ValueError(f"{SCOPE_ENV_VAR} must not be empty")
+    if sys.platform == "win32":
+        subprocess.check_output = hide_windows_subprocess(
+            subprocess.check_output
+        )
     options = credential_options()
 
     with credential_lock():
