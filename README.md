@@ -209,6 +209,50 @@ long-running Codex app server:
 codex app-server daemon restart
 ```
 
+## Context window
+
+Codex 0.169 takes a model's context window only from its catalog entry.
+`refresh_model_catalog.ps1` copies Codex's own entry for each model
+(`codex debug models`), so the window is OpenAI's default: 272,000 tokens for
+the models here, of which Codex counts 95% (258,400) as usable and compacts at
+90% (244,800). For longer sessions raise `context_window` and
+`max_context_window` in the catalog, then restart Codex.
+
+The ceiling is the deployment's tokens-per-minute limit, not only the model's.
+A request larger than that limit is refused before the context check: 1.6M
+tokens sent to a GlobalStandard deployment with 1,000K TPM came back 429
+"exceeded token rate limit", unbilled. Codex compacts at 90% of the window, so
+with 1,000K TPM a window of 960,000 compacts at 864,000 and leaves 136,000 for
+the turn's new input and the reply. A larger window needs more TPM, which the
+subscription's GlobalStandard quota for the model caps.
+
+A top-level `model_catalog_json` is the catalog for every Codex provider. If
+Codex also uses another provider, list its models in the same file.
+
+### Next to copilot-api
+
+copilot-api can serve this router's models next to its own providers: add the
+router as an `openai-responses` provider and map the bare deployment names to
+it.
+
+```json
+"providers": {
+  "azure": {
+    "type": "openai-responses",
+    "baseUrl": "http://127.0.0.1:8766",
+    "apiKey": "not-needed",
+    "models": {
+      "MODEL_DEPLOYMENT_PRIMARY": { "contextWindow": 960000, "maxOutputTokens": 128000 }
+    }
+  }
+},
+"modelMappings": { "MODEL_DEPLOYMENT_PRIMARY": "azure/MODEL_DEPLOYMENT_PRIMARY" }
+```
+
+The Codex app saves the last-picked model as `model` in `config.toml` without
+its provider, so with one gateway provider every model you pick stays valid.
+Threads that started on `azure-router` keep calling the router directly.
+
 ## Authentication modes
 
 Codex uses its normal ChatGPT login because the provider sets
