@@ -8,7 +8,7 @@ import sys
 import time
 import threading
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -27,6 +27,9 @@ HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+# Sent to a passthrough gateway instead of the client's bearer (Codex's ChatGPT token) or Entra.
+PASSTHROUGH_AUTHORIZATION = "Bearer not-needed"
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,8 @@ class RouterConfig:
     listen_host: str
     listen_port: int
     routes: dict[str, str]
+    # Model-name prefix -> loopback endpoint that gets those requests unchanged, without Entra.
+    passthrough: dict[str, str] = field(default_factory=dict)
 
 
 class EntraTokenCache:
@@ -89,7 +94,7 @@ def load_config(path: Path) -> RouterConfig:
         raise ValueError("Router config must be a JSON object")
 
     listen_host = raw.get("listen_host", "127.0.0.1")
-    if listen_host not in {"127.0.0.1", "::1", "localhost"}:
+    if listen_host not in LOOPBACK_HOSTS:
         raise ValueError("Router listener must use a loopback host")
 
     listen_port = raw.get("listen_port", 8765)
@@ -116,10 +121,32 @@ def load_config(path: Path) -> RouterConfig:
             raise ValueError(f"Route {model!r} has an invalid endpoint")
         routes[model] = endpoint.rstrip("/")
 
+    raw_passthrough = raw.get("passthrough", {})
+    if not isinstance(raw_passthrough, dict):
+        raise ValueError("passthrough must map model prefixes to endpoints")
+    passthrough: dict[str, str] = {}
+    for prefix, endpoint in raw_passthrough.items():
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise ValueError("Every passthrough must have a non-empty model prefix")
+        if not isinstance(endpoint, str):
+            raise ValueError(f"Passthrough {prefix!r} must have a string endpoint")
+        parsed = urlsplit(endpoint)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in LOOPBACK_HOSTS
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError(
+                f"Passthrough {prefix!r} must be an http(s) endpoint on a loopback host"
+            )
+        passthrough[prefix] = endpoint.rstrip("/")
+
     return RouterConfig(
         listen_host=listen_host,
         listen_port=listen_port,
         routes=routes,
+        passthrough=passthrough,
     )
 
 
@@ -239,6 +266,17 @@ def create_server(
             model = payload.get("model")
             endpoint = config.routes.get(model)
             if endpoint is None:
+                gateway = next(
+                    (
+                        url
+                        for prefix, url in config.passthrough.items()
+                        if isinstance(model, str) and model.startswith(prefix)
+                    ),
+                    None,
+                )
+                if gateway is not None:
+                    self._proxy(gateway, body, use_entra=False)
+                    return
                 self._send_json(
                     400,
                     {
@@ -252,7 +290,7 @@ def create_server(
 
             self._proxy(endpoint, body)
 
-        def _proxy(self, endpoint: str, body: bytes) -> None:
+        def _proxy(self, endpoint: str, body: bytes, use_entra: bool = True) -> None:
             endpoint_url = urlsplit(endpoint)
             request_url = urlsplit(self.path)
             if not request_url.path.startswith("/v1/"):
@@ -285,7 +323,9 @@ def create_server(
                 | {"host", "content-length", "authorization"}
             }
             headers["Content-Length"] = str(len(body))
-            if token_provider is not None:
+            if not use_entra:
+                headers["Authorization"] = PASSTHROUGH_AUTHORIZATION
+            elif token_provider is not None:
                 try:
                     headers["Authorization"] = (
                         f"Bearer {token_provider()}"

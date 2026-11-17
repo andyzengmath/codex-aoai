@@ -251,7 +251,15 @@ it.
 
 The Codex app saves the last-picked model as `model` in `config.toml` without
 its provider, so with one gateway provider every model you pick stays valid.
-Threads that started on `azure-router` keep calling the router directly.
+Threads that started on `azure-router` keep calling the router, and the picker
+offers them the gateway's models too. For those, add a `passthrough` to
+`routes.local.json`: a model whose name starts with the prefix goes to that
+loopback endpoint unchanged, with a placeholder bearer instead of the Entra
+token or the client's own.
+
+```json
+"passthrough": { "m365/": "http://127.0.0.1:4141/v1" }
+```
 
 ## Authentication modes
 

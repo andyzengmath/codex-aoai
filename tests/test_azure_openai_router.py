@@ -172,6 +172,54 @@ class AzureOpenAIRouterTests(unittest.TestCase):
         self.assertEqual(error["error"]["code"], "unknown_model")
         self.assertEqual(RecordingUpstreamHandler.requests, [])
 
+    def test_passes_prefixed_models_to_a_loopback_gateway_without_entra(self) -> None:
+        upstream_port = self.upstream.server_address[1]
+        config = RouterConfig(
+            listen_host="127.0.0.1",
+            listen_port=0,
+            routes=self.config.routes,
+            passthrough={"gateway/": f"http://127.0.0.1:{upstream_port}/v1"},
+        )
+        router = create_server(config, token_provider=lambda: "entra-token")
+        payload = json.dumps({"model": "gateway/model-x", "input": "hello"}).encode()
+
+        with running_server(self.upstream), running_server(router):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{router.server_address[1]}/v1/responses",
+                data=payload,
+                method="POST",
+                headers={
+                    "Authorization": "Bearer client-token",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                status = response.status
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(RecordingUpstreamHandler.requests), 1)
+        forwarded = RecordingUpstreamHandler.requests[0]
+        self.assertEqual(forwarded["path"], "/v1/responses")
+        self.assertEqual(forwarded["authorization"], "Bearer not-needed")
+        self.assertEqual(forwarded["body"], payload)
+
+    def test_rejects_non_loopback_passthrough(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "routes.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "routes": {
+                            "MODEL_PRIMARY": "https://resource.openai.azure.com/openai/v1"
+                        },
+                        "passthrough": {"gateway/": "https://gateway.example/v1"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                load_config(path)
+
     def test_rejects_missing_bearer_token(self) -> None:
         payload = json.dumps({"model": "MODEL_PRIMARY", "input": "hello"}).encode()
 
