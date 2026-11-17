@@ -220,6 +220,33 @@ class AzureOpenAIRouterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config(path)
 
+    def test_reports_a_token_failure_instead_of_dropping_the_connection(self) -> None:
+        def failing_token_provider() -> str:
+            raise OSError("Azure CLI is not installed")
+
+        router = create_server(self.config, token_provider=failing_token_provider)
+        payload = json.dumps({"model": "MODEL_PRIMARY", "input": "hello"}).encode()
+
+        with running_server(self.upstream), running_server(router):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{router.server_address[1]}/v1/responses",
+                data=payload,
+                method="POST",
+                headers={
+                    "Authorization": "Bearer client-token",
+                    "Content-Type": "application/json",
+                },
+            )
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request, timeout=5)
+
+        response = caught.exception
+        self.assertEqual(response.code, 502)
+        error = json.loads(response.read())
+        response.close()
+        self.assertEqual(error["error"]["code"], "entra_authentication_failed")
+        self.assertEqual(RecordingUpstreamHandler.requests, [])
+
     def test_rejects_missing_bearer_token(self) -> None:
         payload = json.dumps({"model": "MODEL_PRIMARY", "input": "hello"}).encode()
 

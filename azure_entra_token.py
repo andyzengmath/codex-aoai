@@ -16,8 +16,10 @@ from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 DEFAULT_SCOPE = "https://cognitiveservices.azure.com/.default"
 SCOPE_ENV_VAR = "AZURE_OPENAI_TOKEN_SCOPE"
 CREDENTIAL_MODE_ENV_VAR = "AZURE_OPENAI_CREDENTIAL_MODE"
-LOCK_TIMEOUT_SECONDS = 90
-PROCESS_TIMEOUT_SECONDS = 30
+# az takes 30-40 s to start on a loaded machine. The router caches each token until shortly before
+# it expires, so az runs about once an hour; the lock outlasts both attempts.
+LOCK_TIMEOUT_SECONDS = 300
+PROCESS_TIMEOUT_SECONDS = 120
 TOKEN_ATTEMPTS = 2
 AZURE_CLI_PYTHONW_ENV_VAR = "AZURE_CLI_PYTHONW"
 
@@ -47,30 +49,35 @@ def acquire_azure_cli_token(
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = subprocess.SW_HIDE
-    result = run(
-        [
-            cli_pythonw,
-            "-IBm",
-            "azure.cli",
-            "account",
-            "get-access-token",
-            "--output",
-            "json",
-            "--resource",
-            resource,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=PROCESS_TIMEOUT_SECONDS,
-        cwd=os.environ.get("SYSTEMROOT"),
-        env={
-            **os.environ,
-            "AZ_INSTALLER": "MSI",
-            "AZURE_CORE_NO_COLOR": "true",
-        },
-        creationflags=subprocess.CREATE_NO_WINDOW,
-        startupinfo=startupinfo,
-    )
+    try:
+        result = run(
+            [
+                cli_pythonw,
+                "-IBm",
+                "azure.cli",
+                "account",
+                "get-access-token",
+                "--output",
+                "json",
+                "--resource",
+                resource,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=PROCESS_TIMEOUT_SECONDS,
+            cwd=os.environ.get("SYSTEMROOT"),
+            env={
+                **os.environ,
+                "AZ_INSTALLER": "MSI",
+                "AZURE_CORE_NO_COLOR": "true",
+            },
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            startupinfo=startupinfo,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ClientAuthenticationError(
+            f"Azure CLI didn't return a token within {PROCESS_TIMEOUT_SECONDS} s"
+        ) from exc
     if result.returncode != 0:
         message = result.stderr.strip() or "Azure CLI token request failed"
         raise ClientAuthenticationError(message)

@@ -13,7 +13,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from azure.core.exceptions import ClientAuthenticationError
 from azure_entra_token import acquire_token
 
 HOP_BY_HOP_HEADERS = {
@@ -330,7 +329,9 @@ def create_server(
                     headers["Authorization"] = (
                         f"Bearer {token_provider()}"
                     )
-                except (ClientAuthenticationError, RuntimeError, ValueError) as exc:
+                # Any failure to get a token (az timing out, az missing) must answer with an
+                # error; an exception here would drop the connection and the client would retry.
+                except Exception as exc:  # noqa: BLE001
                     self._send_json(
                         502,
                         {

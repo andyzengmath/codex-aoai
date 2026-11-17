@@ -51,6 +51,18 @@ class AcquireTokenTests(unittest.TestCase):
         self.assertTrue(startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW)
         self.assertEqual(startupinfo.wShowWindow, subprocess.SW_HIDE)
 
+    def test_azure_cli_timeout_is_an_authentication_failure(self) -> None:
+        run = Mock(side_effect=subprocess.TimeoutExpired(cmd="az", timeout=1))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cli_pythonw = Path(temp_dir) / "pythonw.exe"
+            cli_pythonw.touch()
+            with self.assertRaisesRegex(ClientAuthenticationError, "within"):
+                azure_entra_token.acquire_azure_cli_token(
+                    azure_entra_token.DEFAULT_SCOPE,
+                    cli_pythonw=str(cli_pythonw),
+                    run=run,
+                )
+
     @patch("azure_entra_token.acquire_azure_cli_token")
     @patch("azure_entra_token.DefaultAzureCredential")
     def test_uses_default_scope_and_trims_token(
